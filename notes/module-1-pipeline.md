@@ -174,3 +174,61 @@ No. The pipeline is a temporary build machine (Moment 1) — my laptop's
 routine, automated. The production server (Moment 2) only receives and
 runs the compiled output. Once the pipeline passes, production doesn't
 need any build tools.
+
+## Step 6: tsconfig.json — the compiler's rulebook
+
+The TypeScript compiler needs instructions before it can work:
+1. Which files to compile? → `include: ["src"]` + `rootDir: "src"`
+2. Where to put output? → `outDir: "dist"` (generated JS, kept separate
+   from source; added `dist/` to .gitignore — like node_modules, it's
+   reproducible and never committed)
+3. What JS version to produce? → `target: "ES2022"` (modern Node
+   understands it)
+4. How strict? → `strict: true`
+
+Why strict mode is non-negotiable for us: the compiler refuses code that
+might use an undefined variable or an unverifiable type. Loose mode lets
+these slide into runtime crashes/bugs — and some vulnerabilities start as
+exactly these bugs. Strict mode is our first quality gate, before we even
+have a pipeline.
+
+tsconfig.json is saved in the repo so every machine (laptop, pipeline)
+compiles identically — same reproducibility idea as package-lock.json,
+but for the build.
+
+Plumbing options: `esModuleInterop` (imports work smoothly with packages
+like Express), `skipLibCheck` (skip re-checking library type files; faster
+builds, still fully checks OUR code).
+
+## Step 7: The server in TypeScript (src/index.ts)
+
+- `import express, { Request, Response }` — TS import syntax; also pulls
+  the type definitions from @types/express.
+- `(req: Request, res: Response)` — typed handler params. Typos like
+  `res.jsn()` now fail at compile time instead of crashing at runtime.
+- `/` route — replies with JSON. req = incoming request, res = our reply.
+- `/health` route — an "am I alive?" endpoint. Kubernetes will probe
+  endpoints like this in Module 4.
+- `app.listen(PORT)` — bind port 3000 and wait, like a process binding a
+  socket.
+
+## Step 8: npx and npm scripts
+
+- `npx <tool>` runs a binary from local node_modules (node_modules/.bin)
+  without global install.
+- The `"scripts"` block in package.json gives named shortcuts that humans
+  AND pipelines use. Inside scripts, npx isn't needed — npm checks
+  node_modules/.bin automatically.
+
+Our scripts:
+- `npm run dev` → tsx runs the .ts directly (fast, dev only)
+- `npm run build` → tsc compiles src/ to dist/ (silence = success)
+- `npm start` → node runs the compiled dist/index.js (what production does)
+
+The flow:
+src/index.ts → npm run build (tsc) → dist/index.js → npm start (node)
+dev shortcut: npm run dev (tsx, skips compiling for speed)
+
+We verified all three: dev server answered on /, /health returned
+{"status":"ok"}, build produced dist/index.js, and npm start ran the
+compiled output.

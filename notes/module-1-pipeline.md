@@ -232,3 +232,18 @@ dev shortcut: npm run dev (tsx, skips compiling for speed)
 We verified all three: dev server answered on /, /health returned
 {"status":"ok"}, build produced dist/index.js, and npm start ran the
 compiled output.
+
+## Mistake: committed dist/ to Git
+
+The commit output showed `create mode ... labs/app-1/dist/index.js` —
+compiled output got committed because `dist/` was missing from .gitignore.
+
+Fix:
+1. Added `dist/` to the root .gitignore.
+2. `.gitignore` only affects UNTRACKED files, so for the already-tracked
+   file we ran `git rm -r --cached labs/app-1/dist` — this removes it from
+   Git's tracking but keeps it on disk.
+3. Committed the fix.
+
+Lesson: read every commit's output. The file list is a mini security
+review — it's how we caught this.

@@ -247,3 +247,138 @@ Fix:
 
 Lesson: read every commit's output. The file list is a mini security
 review — it's how we caught this.
+
+## Concept: GitHub Actions from zero
+
+GitHub Actions is GitHub's built-in pipeline machine. You describe the
+pipeline in a file at `.github/workflows/<name>.yml` — GitHub watches that
+folder, and any .yml inside becomes a **workflow**. The pipeline is code,
+versioned in the same repo it protects.
+
+Three building blocks:
+1. **Trigger (`on:`)** — WHEN to run (ours: on every push)
+2. **Job** — a set of steps that runs on one fresh machine
+3. **Steps** — the commands, in order (mirrors what I did by hand:
+   checkout code, install Node, npm install, npm run build)
+
+Mental model: a workflow file = "when X happens, spin up a machine and run
+these commands." All security tools later (SAST, SCA, secrets) are just
+more steps/jobs in this file.
+
+Security seed: the runner executes whatever the workflow file says — so
+anyone who can change that file can make GitHub's machines run arbitrary
+commands. Pipeline files are a prime attack target.
+
+"Actions" also means reusable pre-built steps from a marketplace (e.g.
+actions/checkout). Third-party steps are a supply-chain risk, same idea as
+npm packages — we'll scrutinize them later.
+
+## Deep dive: what a runner actually is
+
+**Physical or not?** GitHub (owned by Microsoft) runs datacenters of
+physical servers. On each, a **hypervisor** slices the hardware into many
+**virtual machines (VMs)** — complete fake computers with their own OS,
+CPU share, RAM, and disk, fully isolated from each other. Like processes
+isolated by a kernel, but one level deeper: whole OSes isolated by a
+hypervisor.
+
+**Resource allocation — never unlimited.** Same as running VMware on my
+laptop: the VM gets a fixed slice of the host (some vCPUs, some GB RAM,
+some disk) and sees only that slice. A **vCPU** is a share of physical
+cores the hypervisor schedules for the VM. If a job exceeds its slice, it
+fails. GitHub publishes current runner sizes (link below).
+
+**A "runner"** = the VM + the runner agent (GitHub's open-source program
+pre-installed in it) that talks to GitHub and executes jobs.
+
+**The full flow of a run:**
+1. git push
+2. GitHub checks .github/workflows/ for matching triggers
+3. Match → job created and queued
+4. Control plane picks a pre-booted VM from a warm pool (fast starts)
+5. Runner agent polls GitHub outbound over HTTPS: "any job for me?"
+   (outbound-only = nothing needs to reach into the VM)
+6. Agent receives the job (workflow steps as a to-do list)
+7. Executes steps in order, streams logs live to the Actions tab
+8. Job ends → the ENTIRE VM is destroyed. Not cleaned — destroyed.
+
+**VM images:** each VM starts from a snapshot (e.g. `ubuntu-latest`:
+Ubuntu preloaded with Git, Node, Python, Docker...). Every job gets an
+identical fresh copy.
+
+**Why destroy every time (security):**
+- No leftovers: code, caches, secrets vanish with the VM
+- No cross-contamination between jobs/users on shared hardware
+- Reproducibility: every run starts from the identical image
+This is why every run must npm install again — the VM has never seen our
+project before.
+
+**Who controls what:** GitHub/Microsoft control hardware, hypervisors,
+images, queue, orchestration. I control only the workflow file — which is
+exactly why it's the attack target. Alternative: **self-hosted runners**
+(run the agent on your own machine; more control, but you own its
+security).
+
+## Q&A: re-running failed jobs when VMs are destroyed
+
+The VM was never the thing being re-run — the **job definition** is.
+GitHub's control plane keeps the job definition (workflow content at a
+specific commit). "Re-run failed jobs" = same definition, back in the
+queue, executed by a brand-new fresh VM from the start.
+
+- Fixes flaky failures (network hiccup during npm install) because the
+  retry is a clean attempt.
+- Can never fix a real code bug — same code, same steps, same failure.
+
+What survives the VM: logs (streamed out), results, and **artifacts** —
+files a job explicitly uploads to GitHub before its VM dies (used to pass
+things like scan reports between jobs).
+
+Analogy: VM = process, job definition = program on disk. Killing the
+process doesn't delete the program.
+
+## Q&A: 4 stages = 4 VMs or 1?
+
+Rule: **steps in one job share the same VM; each job gets its own fresh VM.**
+
+- 1 job with 4 steps = 1 VM. Steps share disk/files (install creates
+  node_modules, build uses it). Serial execution.
+- 4 jobs = 4 VMs. They share nothing (each must checkout + install again;
+  data passes only via artifacts) and run in PARALLEL by default. Order is
+  declared with `needs:` (e.g. scan needs build).
+
+Tradeoff: same VM = fast/simple/shared state but serial. Separate jobs =
+parallel + isolated (a compromised scan step can't touch the build VM) but
+each pays setup cost again.
+
+Our first workflow: one job, few steps. Later, scanners split into
+parallel jobs.
+
+## Official docs
+- GitHub Actions overview: https://docs.github.com/en/actions/get-started/understand-github-actions
+- Workflow syntax reference: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
+- GitHub-hosted runners (incl. current VM sizes): https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners
+- Runner images (what's preinstalled): https://github.com/actions/runner-images
+- Runner agent source code: https://github.com/actions/runner
+- Self-hosted runners: https://docs.github.com/en/actions/hosting-your-own-runners
+
+## Q&A: how can GitHub give away VMs for free?
+
+It costs Microsoft real money — paid deliberately because:
+
+1. **Free is metered, not unlimited.** Public repos get standard runners
+   free; private repos get a monthly minutes quota before billing.
+   Concurrency and job-time limits are capped, and abuse (e.g.
+   crypto-mining on runners) is detected and banned.
+2. **Funnel:** individuals learn Actions free → they join companies →
+   companies pay for Enterprise plans, bigger runners, extra minutes.
+3. **Lock-in:** CI is sticky infrastructure — migrating pipelines is
+   painful, so free CI keeps users (and later their employers) on GitHub.
+4. **Open-source strategy:** free public-repo CI makes GitHub the home of
+   open source — worth more in positioning than the compute costs.
+5. **Scale economics:** Microsoft owns Azure datacenters; a short-lived VM
+   on already-running hardware costs cents. Warm pools + high utilization
+   keep it cheap.
+
+Takeaway for this lab: our public repo runs free standard runners with
+generous limits — plenty for 6 months.

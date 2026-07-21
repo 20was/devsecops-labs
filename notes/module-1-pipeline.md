@@ -674,3 +674,50 @@ green. This is the pipeline earning trust.
 ## Official docs
 - npm audit: https://docs.npmjs.com/cli/commands/npm-audit
 - GitHub Advisory Database: https://github.com/advisories
+
+## Finding: package.json still shows the "vulnerable" number after the fix
+
+After `npm audit fix`, package.json still said:
+
+```json
+"dependencies": {
+  "express": "^5.2.1",
+  "lodash": "^4.17.15"
+}
+```
+
+Looks vulnerable — but `npm audit` reports 0 vulnerabilities. Why?
+
+- `^4.17.15` is a RANGE ("4.17.15 or newer within 4.x"), and safe
+  versions (>4.17.23) satisfy it fine → package.json needed no change.
+- What audit fix actually changed was the LOCKFILE (reality).
+
+Verified what's truly installed:
+
+```
+$ npm ls lodash
+app-1@1.0.0
+└── lodash@4.18.1
+```
+
+4.18.1 > 4.17.23 → safely outside the vulnerable range.
+
+**Lesson: never judge installed versions by reading package.json — the
+lockfile is the truth.** During axios incident response this exact
+confusion mattered: teams had to check LOCKED versions, not ranges, to
+know if they were affected.
+
+Side note: since our code never imports lodash, the cleanest fix would be
+`npm uninstall lodash` (less code = smaller attack surface). We keep it
+for now as a lab specimen.
+
+## Next session: secrets scanning
+
+Preview of the problem (concept explained, not yet noted in full):
+- Git never forgets — a committed secret stays in history forever;
+  deletion in a later commit doesn't remove it. Only ROTATION fixes it.
+- Public repos are crawled by bots that find pushed keys within minutes.
+- Defense lines: pre-commit hook (best: secret never enters history) +
+  pipeline scan (safety net + full-history sweep).
+Plan: plant a FAKE AWS-shaped key, push it, watch the current pipeline
+pass it green — prove the gap, then close it.

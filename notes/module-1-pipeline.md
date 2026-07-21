@@ -382,3 +382,168 @@ It costs Microsoft real money — paid deliberately because:
 
 Takeaway for this lab: our public repo runs free standard runners with
 generous limits — plenty for 6 months.
+
+## Step 9: The first workflow file (.github/workflows/ci.yml)
+
+Our first pipeline, naive version:
+
+- `name: CI` — display name in the Actions tab
+- `on: push` — trigger on every push, any branch
+- one job `build` → one VM (`runs-on: ubuntu-latest`)
+- steps: checkout (clone repo onto the VM) → setup-node (install Node 22)
+  → `npm install` → `npm run build`, each with
+  `working-directory: labs/app-1` since the app isn't at repo root
+
+First run: green in 7s. The steps list also showed "Set up job" (agent
+received the job), "Post Run" cleanup steps (in reverse order), and
+"Complete job" (logs finalized, VM about to be destroyed).
+
+## Found & fixed #1: deprecation warning on marketplace Actions
+
+The run had 1 warning: checkout@v4 and setup-node@v4 internally run on
+Node 20, which is deprecated on runners. Marketplace Actions are
+THEMSELVES software with their own runtimes — they age like npm packages.
+Fix: bump both to @v5. Lesson: never ignore pipeline warnings; third-party
+Actions are dependencies too.
+
+## Found & fixed #2: npm install → npm ci
+
+I spotted this one myself: `npm install` in CI doesn't guarantee the
+lockfile versions. Details below.
+
+## Concept: version ranges, pinning, and semver
+
+In package.json: `"express": "^5.2.1"`. The caret means "5.2.1 or newer,
+as long as the first number stays 5".
+
+Semver = MAJOR.MINOR.PATCH:
+- PATCH (5.1.0 → 5.1.1): bug fixes, safe
+- MINOR (5.1 → 5.2): new features, backwards compatible
+- MAJOR (5 → 6): breaking changes
+
+**Pinned** = exact version, no symbol ("5.2.1"). **Not pinned** = a range
+(^) that several versions can satisfy.
+
+## Concept: dependency resolution
+
+`npm install` must turn every range into one concrete version — that
+process is **resolution**: check the registry NOW, pick the newest
+matching version, repeat for the whole tree. The result is frozen into
+package-lock.json (the lockfile = a snapshot of one resolution).
+
+Danger: resolution depends on what exists in the registry at that moment.
+Same package.json on Monday vs Friday can produce different installs —
+resolution is NOT reproducible over time. A new minor of a deep dependency
+can carry a bug — or malware.
+
+## Concept: npm install vs npm ci (silent fix vs loud failure)
+
+If package.json and the lockfile disagree (e.g. someone hand-edited
+package.json):
+- `npm install` SILENTLY re-resolves, installs the new thing, and
+  rewrites the lockfile. Pipeline stays green. The approved dependency
+  list changed invisibly.
+- `npm ci` compares the files, sees the mismatch, and FAILS LOUDLY with a
+  red X. It never resolves anything — it only installs exactly what the
+  lockfile says (and deletes node_modules first for a clean start).
+
+Why loud failure is a feature in CI: the pipeline exists to surface
+problems. A tool that papers over a mismatch makes the pipeline lie.
+Red X → human looks → deliberate decision. General security principle:
+**fail closed, not open.**
+
+## CASE STUDY: the axios supply-chain attack (March 31, 2026)
+
+What happened: an attacker compromised the npm account of the axios lead
+maintainer and published two backdoored versions — axios@1.14.1 (tagged
+latest) and axios@0.30.4 (legacy). Axios = the most popular JS HTTP
+client, ~100M weekly downloads.
+
+The mechanism: the malicious versions added a phantom dependency,
+plain-crypto-js@4.2.1 — a package that hadn't existed before that day and
+is never imported by axios code. Its only purpose: a **postinstall
+script** that drops a cross-platform RAT (remote access trojan) on macOS,
+Windows, and Linux. Attribution: a North Korea-nexus state threat actor.
+
+Who got infected: projects whose install resolved `^1.14.0` / `^0.30.0`
+ranges fresh during the ~3h window — the ^ range grabbed the newest
+(poisoned) version. At least 135 endpoints were seen contacting the
+attacker's command-and-control during those 3 hours.
+
+Who was safe (maintainer's own post-mortem): anyone pinned to a clean
+version via lockfile who didn't fresh-install in the window.
+
+Scoreboard vs our controls:
+| Our control | Effect in this attack |
+|---|---|
+| lockfile + npm ci | never resolves → never installs the poisoned version |
+| blocked install scripts | payload ran via postinstall → blocking stops execution |
+| ^ ranges + fresh resolution | the infection path itself |
+| "assume compromise" | if it executed: rotate ALL secrets (npm tokens, cloud keys, SSH, CI/CD) |
+
+Sources:
+- Maintainer post-mortem: https://github.com/axios/axios/issues/10636
+- Google Threat Intelligence: https://cloud.google.com/blog/topics/threat-intelligence/north-korea-threat-actor-targets-axios-npm-package
+- Microsoft Security Blog: https://www.microsoft.com/en-us/security/blog/2026/04/01/mitigating-the-axios-npm-supply-chain-compromise/
+- Elastic Security Labs (RAT analysis): https://www.elastic.co/security-labs/axios-one-rat-to-rule-all
+- Unit 42 threat brief: https://unit42.paloaltonetworks.com/axios-supply-chain-attack/
+
+## Q&A: if ranges are the infection path, why is ^ the npm default?
+
+1. Ranges were meant to HELP security: patches flow in automatically;
+   pinned versions go stale until a human remembers to bump them.
+2. Dependency trees need ranges to resolve: many packages share
+   sub-dependencies; exact-only demands would conflict or duplicate.
+3. The default was chosen (2014) before the modern supply-chain threat
+   era — optimized for that decade's problems.
+
+Modern resolution of the tension = the two-file system:
+- package.json + ^ = INTENT ("I accept compatible updates when I
+  consciously update")
+- package-lock.json = REALITY (exact frozen versions)
+- npm ci = ENFORCEMENT (reality always wins in CI/production)
+
+With this trio, ^ only acts when you deliberately update — a reviewed,
+committed, CI-tested act. Axios burned projects with undisciplined
+process (no lockfile, npm install in CI, auto-merge bots). Some
+high-security teams remove ^ entirely and pin package.json too — valid,
+but then every update needs active management (update bot + human review).
+
+## Q&A: how does a pinned, clean version "get" a vulnerability later?
+
+The code never changes — our KNOWLEDGE about it changes. The flaw was
+there all along; someone found it.
+
+Lifecycle:
+1. Flaw is born — an innocent bug ships in e.g. express@5.2.1.
+2. Discovery — by a researcher, an incident investigation, or an attacker
+   (if attackers know first: a **zero-day**).
+3. Responsible disclosure — private report to maintainers, fix developed
+   before publication (typical deadline ~90 days).
+4. Fix + CVE — patched version released; the flaw gets a public **CVE**
+   ID in the worldwide vulnerability catalog: "express ≤ 5.2.1 vulnerable
+   to X, fixed in 5.2.2".
+5. The race — the moment the CVE is public, attackers have a map of every
+   unpatched app. Automated scans sweep the internet within hours.
+   Publication protects the fast and exposes the slow.
+
+"Your version got a vulnerability" = its CVE entry appeared. Yesterday:
+unknowingly vulnerable. Today: KNOWINGLY vulnerable — and visible.
+
+This is exactly what SCA scanning in the pipeline does: on every push,
+compare all locked versions against the latest CVE catalog and fail the
+build on known-vulnerable versions. Results can change overnight with
+zero code changes — the catalog moved, not the code.
+
+The two dependency threats pull in OPPOSITE directions:
+- Supply-chain attack (axios): malicious code ADDED to a NEW version →
+  don't grab new versions blindly (lockfile, npm ci, blocked scripts)
+- CVE (discovered flaw): innocent bug FOUND in an OLD version → don't sit
+  on old versions (SCA scanning, timely deliberate upgrades)
+Security is the balance between the two; the pipeline automates both.
+
+## Official docs
+- npm ci: https://docs.npmjs.com/cli/commands/npm-ci
+- semver ranges: https://docs.npmjs.com/cli/using-npm/dependency-selectors
+- package-lock.json: https://docs.npmjs.com/cli/configuring-npm/package-lock-json
+- CVE program: https://www.cve.org/About/Overview

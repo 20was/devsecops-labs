@@ -547,3 +547,130 @@ Security is the balance between the two; the pipeline automates both.
 - semver ranges: https://docs.npmjs.com/cli/using-npm/dependency-selectors
 - package-lock.json: https://docs.npmjs.com/cli/configuring-npm/package-lock-json
 - CVE program: https://www.cve.org/About/Overview
+
+
+## Step 10: SCA gate with npm audit
+
+**SCA (Software Composition Analysis)** = check every third-party package
+version against the CVE catalog, on every push. This is CVE-lifecycle
+step 5 automated: the catalog changes overnight, our code doesn't — so
+the scan must re-run constantly.
+
+**Gate design decision:** warnings-only gets ignored; fail-on-everything
+blocks builds with low-severity noise until people bypass the pipeline.
+Standard compromise: **fail only on high/critical** → the flag
+`--audit-level=high` (report everything, exit with error only on high+).
+
+Our full `.github/workflows/ci.yml` at this point:
+
+```yaml
+name: CI
+
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - run: npm ci
+        working-directory: labs/app-1
+
+      - run: npm audit --audit-level=high
+        working-directory: labs/app-1
+
+      - run: npm run build
+        working-directory: labs/app-1
+```
+
+Order matters: audit runs after `npm ci` (needs the installed tree) and
+before build (no build output from a vulnerable tree).
+
+First run with the gate: green, log showed `found 0 vulnerabilities`.
+
+## Learn-by-breaking: triggering the gate with vulnerable lodash
+
+We deliberately installed an old version with real published CVEs:
+
+```
+npm install lodash@4.17.15
+```
+
+npm's automatic audit complained instantly:
+
+```
+added 2 packages, and audited 86 packages in 717ms
+1 high severity vulnerability
+```
+
+Full report via `npm audit`:
+
+```
+lodash <=4.17.23
+Severity: high
+Command Injection in lodash - GHSA-35jh-r3h4-6jhm
+Prototype Pollution in lodash - GHSA-p6mc-m468-83gw
+Regular Expression DoS (ReDoS) in lodash - GHSA-29mw-wpgm-hmr9
+Code Injection via _.template - GHSA-r5fr-rjxr-66jc
+Prototype Pollution via .unset/.omit - GHSA-f23m-r3pf-42rh (+1 more)
+fix available via npm audit fix
+1 high severity vulnerability
+```
+
+### Reading the report like a security engineer
+- `lodash <=4.17.23` — the vulnerable RANGE. Wider than our 4.17.15:
+  even the last 4.17.x releases carry some flaws.
+- Six GHSA advisories on one package. A **GHSA** (GitHub Security
+  Advisory) is the human-readable wrapper around a CVE. Years of
+  accumulated "knowledge changes" about old lodash.
+- Vulnerability classes (all return in Module 2):
+  - **Command/Code Injection** — attacker input gets executed. Worst class.
+  - **Prototype Pollution** (×3) — JS-specific: crafted input mutates
+    Object.prototype, silently changing behavior of ALL objects.
+  - **ReDoS** — malicious string makes a bad regex burn CPU → DoS.
+- "1 vulnerability" vs six advisories: npm counts vulnerable PACKAGES,
+  not advisories. Read summaries with that in mind.
+
+## The pipeline catches it (run #5, red)
+
+Pushed the vulnerable state → Actions run failed exactly as designed:
+
+- `npm ci` ✅ → `npm audit --audit-level=high` ❌ RED
+- `npm run build` — SKIPPED (crossed-circle icon): steps after a failure
+  don't run. No artifact gets built from a known-vulnerable tree.
+  **Fail closed.**
+- Post Run cleanup steps still executed (cleanup always happens).
+
+## Remediation: npm audit fix
+
+```
+npm audit fix
+→ changed 1 package, and audited 86 packages
+→ found 0 vulnerabilities
+```
+
+Verified locally with `npm audit` (verify, don't assume), checked
+package.json for the new lodash version, pushed → pipeline green again.
+
+### When audit fix is safe vs dangerous
+- **`npm audit fix`** — safe-ish: moves only WITHIN existing semver
+  ranges (patch/minor). Worst case: subtle behavior changes → tests
+  should catch (we still have no tests — known gap, coming soon).
+- **`npm audit fix --force`** — dangerous: crosses MAJOR versions
+  automatically. Breaking changes to fix a vuln can break the app. A
+  major upgrade is a deliberate human migration with changelog reading.
+- **No fixed version exists** (unmaintained package): real decision =
+  replace the package, or accept + document the risk with a deadline.
+  Formal process comes in Module 5.
+
+Full cycle demonstrated: break → gate catches → remediate → verify →
+green. This is the pipeline earning trust.
+
+## Official docs
+- npm audit: https://docs.npmjs.com/cli/commands/npm-audit
+- GitHub Advisory Database: https://github.com/advisories

@@ -15,5 +15,8 @@ jobs:
       - run: npm ci
         working-directory: labs/app-1
 
+      - run: npm audit --audit-level=high
+        working-directory: labs/app-1
+
       - run: npm run build
         working-directory: labs/app-1

@@ -834,7 +834,7 @@ Proof realistic keys ARE caught (no git, no commit — `gitleaks dir`
 scans plain files):
 
 ```bash
-echo "aws_key = 'AKIA9QZ3X7V2P8M4N6T1'" > /tmp/leak-test.txt
+echo "aws_key = 'AKIA9QZ3...REDACTED'" > /tmp/leak-test.txt
 gitleaks dir /tmp/leak-test.txt -v
 # → leaks found: 1 (RuleID: generic-api-key, entropy 4.22)
 ```

@@ -915,3 +915,55 @@ Our repo: keys are fake + documented teaching artifacts → history stays.
 - GITHUB_TOKEN: https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication
 - Node --env-file: https://nodejs.org/docs/latest/api/cli.html#--env-fileconfig
 - git filter-repo: https://github.com/newren/git-filter-repo
+
+## Incident: our documentation of the leak became a leak
+
+Unplanned, and the best lesson of the day. Timeline:
+
+**Run #13 — RED.** We pushed the secrets-scanning NOTES, and gitleaks
+flagged them: the note file contained the realistic fake key (line 837,
+rule `aws-access-token` this time — in this context the dedicated AWS
+rule fired, unlike the local `gitleaks dir` test where generic-api-key
+caught it. More proof that rules are layered and context-dependent).
+
+Why this is correct scanner behavior: a secret-shaped string is a
+secret-shaped string, in code OR prose. The scanner cannot know intent
+and must assume the worst. Real security teams hit this constantly with
+incident reports, postmortems, and training docs.
+
+**Fix attempt #1 — defang by shortening: FAILED (run #14 also RED).**
+We replaced the key with `AKIA9QZ3...REDACTED` — still 19 token-ish
+characters, in quotes, next to `aws_key =`. The generic-api-key rule
+matches on context (keyword + quoted value) plus a token-looking string:
+**we altered the STRING but preserved the PATTERN.** Dots in the middle
+don't say "redacted" to a regex.
+
+**Debugging upgrade: reproduce locally, stop push-and-pray.**
+
+```bash
+sed -n '830,845p' notes/module-1-pipeline.md   # print just lines 830-845
+gitleaks dir notes/ -v                          # scan file contents as-is
+```
+
+Local scan confirmed the exact finding in seconds — same info as a CI
+round-trip, without polluting history with failed fix commits.
+
+**Fix attempt #2 — break the SHAPE: WORKED.** Replaced the value with
+`<FAKE_AWS_KEY_AKIA_FORMAT>` — angle brackets can't appear in real
+tokens, so no rule can match. Verified locally (`no leaks found`), THEN
+pushed → green.
+
+### Lessons
+
+1. **Docs are code.** Everything committed gets scanned; notes,
+   postmortems, and examples must be written scanner-aware.
+2. **Defang = break the pattern, not just edit the string.** Use
+   placeholders with impossible characters (`<LIKE_THIS>`), not
+   shortened/dotted versions of the real shape.
+3. **Verify locally before pushing.** The push-fail-edit-push loop is
+   slow and litters history. `gitleaks dir` (and friends) give the same
+   answer in seconds. This is exactly the argument for pre-commit hooks —
+   which we build next.
+4. Alternative when the exact string MUST stay (rare):
+   `.gitleaksignore` with the finding's fingerprint — an explicit,
+   auditable exception. Defanging is cleaner and should be the default.
